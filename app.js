@@ -3823,6 +3823,8 @@ function setupEventListeners() {
     });
 
     document.getElementById('project-name-input').addEventListener('keydown', (e) => {
+        // Ignore Enter that confirms an IME conversion
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter') {
             document.getElementById('project-modal-confirm').click();
         }
@@ -6320,8 +6322,18 @@ function startRenameScreenshot(index) {
         updateScreenshotList();
     };
 
+    // Track IME composition so Enter/Escape during conversion is not treated
+    // as commit/cancel (Japanese, Chinese, Korean input)
+    let composing = false;
+    input.addEventListener('compositionstart', () => { composing = true; });
+    input.addEventListener('compositionend', () => {
+        // Safari fires compositionend before the confirming Enter keydown
+        setTimeout(() => { composing = false; }, 0);
+    });
+
     input.addEventListener('keydown', (e) => {
         e.stopPropagation();
+        if (composing || e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter') {
             e.preventDefault();
             commit();
