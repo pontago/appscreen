@@ -6271,6 +6271,75 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
 
 let draggedScreenshotIndex = null;
 
+function escapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+}
+
+// Swap the name label for a text input so the screenshot can be renamed inline
+function startRenameScreenshot(index) {
+    const screenshot = state.screenshots[index];
+    if (!screenshot) return;
+
+    const item = screenshotList.querySelector(`.screenshot-item[data-index="${index}"]`)
+        || screenshotList.querySelectorAll('.screenshot-item')[index];
+    const nameEl = item?.querySelector('.screenshot-name');
+    if (!nameEl || nameEl.querySelector('input')) return;
+
+    // Dragging would swallow text selection inside the input
+    item.draggable = false;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'screenshot-name-input';
+    input.value = screenshot.name || '';
+    nameEl.textContent = '';
+    nameEl.appendChild(input);
+
+    let finished = false;
+    const commit = () => {
+        if (finished) return;
+        finished = true;
+        const newName = input.value.trim();
+        if (newName && newName !== screenshot.name) {
+            screenshot.name = newName;
+            // Keep the current language's image entry in sync so filename-based
+            // matching on re-upload follows the new name
+            const langData = screenshot.localizedImages?.[state.currentLanguage];
+            if (langData) langData.name = newName;
+            updateScreenshotList();
+            updateCanvas(); // Persists via saveState()
+        } else {
+            updateScreenshotList();
+        }
+    };
+    const cancel = () => {
+        if (finished) return;
+        finished = true;
+        updateScreenshotList();
+    };
+
+    input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            commit();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            cancel();
+        }
+    });
+    input.addEventListener('blur', commit);
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('dblclick', (e) => e.stopPropagation());
+
+    input.focus();
+    // Preselect the name without its extension
+    const dot = input.value.lastIndexOf('.');
+    input.setSelectionRange(0, dot > 0 ? dot : input.value.length);
+}
+
 function updateScreenshotList() {
     screenshotList.innerHTML = '';
     const isEmpty = state.screenshots.length === 0;
@@ -6321,6 +6390,13 @@ function updateScreenshotList() {
                     </svg>
                 </button>
                 <div class="screenshot-menu" data-index="${index}">
+                    <button class="screenshot-menu-item screenshot-rename" data-index="${index}">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 20h9"/>
+                            <path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/>
+                        </svg>
+                        Rename...
+                    </button>
                     <button class="screenshot-menu-item screenshot-translations" data-index="${index}">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M5 8l6 6M4 14l6-6 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/>
@@ -6388,7 +6464,7 @@ function updateScreenshotList() {
                     <rect x="3" y="3" width="18" height="18" rx="2"/>
                 </svg>
               </div>`
-            : `<img class="screenshot-thumb" src="${thumbSrc}" alt="${screenshot.name}">`;
+            : `<img class="screenshot-thumb" src="${thumbSrc}" alt="${escapeHtml(screenshot.name)}">`;
 
         item.innerHTML = `
             <div class="drag-handle">
@@ -6400,7 +6476,7 @@ function updateScreenshotList() {
             </div>
             ${thumbHtml}
             <div class="screenshot-info">
-                <div class="screenshot-name">${screenshot.name}</div>
+                <div class="screenshot-name" title="Double-click to rename">${escapeHtml(screenshot.name)}</div>
                 <div class="screenshot-device">${isTransferTarget ? 'Click source to copy style' : screenshot.deviceType}${langFlagsHtml}</div>
             </div>
             ${buttonsHtml}
@@ -6526,6 +6602,15 @@ function updateScreenshotList() {
             updateCanvas();
         });
 
+        // Double-click the name to rename inline
+        const nameEl = item.querySelector('.screenshot-name');
+        if (nameEl && !isTransferMode) {
+            nameEl.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+                startRenameScreenshot(index);
+            });
+        }
+
         // Menu button handler
         const menuBtn = item.querySelector('.screenshot-menu-btn');
         const menu = item.querySelector('.screenshot-menu');
@@ -6537,6 +6622,16 @@ function updateScreenshotList() {
                     if (m !== menu) m.classList.remove('open');
                 });
                 menu.classList.toggle('open');
+            });
+        }
+
+        // Rename button handler
+        const renameBtn = item.querySelector('.screenshot-rename');
+        if (renameBtn) {
+            renameBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                menu?.classList.remove('open');
+                startRenameScreenshot(index);
             });
         }
 

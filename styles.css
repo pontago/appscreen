@@ -349,6 +349,20 @@ html.tauri-app .right-sidebar {
     text-overflow: ellipsis;
 }
 
+.screenshot-name-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 1px 4px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    outline: none;
+}
+
 .screenshot-device {
     font-size: 11px;
     color: var(--text-secondary);
