@@ -540,6 +540,37 @@ function formatValue(num) {
     return Number.isInteger(rounded) ? rounded.toString() : rounded.toFixed(1);
 }
 
+// Background images are live HTMLImageElement objects, which IndexedDB cannot
+// clone. Persist the source URL as `imageSrc` and rebuild the Image on load.
+function serializeBackground(bg) {
+    if (!bg) return bg;
+    const { image, ...rest } = bg;
+    return { ...rest, imageSrc: (image && image.src) || bg.imageSrc || '' };
+}
+
+function restoreBackgroundImage(bg) {
+    if (!bg) return bg;
+    if (bg.image instanceof HTMLImageElement) return bg;
+    bg.image = null;
+    if (bg.imageSrc) {
+        const img = new Image();
+        img.onload = () => {
+            bg.image = img;
+            updateCanvas();
+        };
+        img.src = bg.imageSrc;
+    }
+    return bg;
+}
+
+// Deep copy a background while keeping the live Image reference intact
+function cloneBackground(bg) {
+    if (!bg) return bg;
+    const copy = JSON.parse(JSON.stringify(serializeBackground(bg)));
+    copy.image = bg.image instanceof HTMLImageElement ? bg.image : null;
+    return copy;
+}
+
 function setBackground(key, value) {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
@@ -552,6 +583,10 @@ function setBackground(key, value) {
             obj[parts[parts.length - 1]] = value;
         } else {
             screenshot.background[key] = value;
+        }
+        // Keep the persistable source URL in sync with the live Image object
+        if (key === 'image') {
+            screenshot.background.imageSrc = value?.src || '';
         }
     }
 }
@@ -582,7 +617,7 @@ function setTextSetting(key, value) {
 function setCurrentScreenshotAsDefault() {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
-        state.defaults.background = JSON.parse(JSON.stringify(screenshot.background));
+        state.defaults.background = cloneBackground(screenshot.background);
         state.defaults.screenshot = JSON.parse(JSON.stringify(screenshot.screenshot));
         state.defaults.text = JSON.parse(JSON.stringify(screenshot.text));
     }
@@ -1510,7 +1545,7 @@ function saveState() {
             name: s.name,
             deviceType: s.deviceType,
             localizedImages: localizedImages,
-            background: s.background,
+            background: serializeBackground(s.background), // Strip HTMLImageElement
             screenshot: s.screenshot,
             text: s.text,
             elements: (s.elements || []).map(el => ({
@@ -1532,7 +1567,14 @@ function saveState() {
         customHeight: state.customHeight,
         currentLanguage: state.currentLanguage,
         projectLanguages: state.projectLanguages,
-        defaults: state.defaults
+        defaults: {
+            ...state.defaults,
+            background: serializeBackground(state.defaults.background),
+            elements: (state.defaults.elements || []).map(el => ({
+                ...el,
+                image: undefined // Don't serialize Image objects
+            }))
+        }
     };
 
     // Update screenshot count in project metadata
@@ -1628,6 +1670,7 @@ function loadState() {
                                 gradient: parsed.background.gradient || state.defaults.background.gradient,
                                 solid: parsed.background.solid || state.defaults.background.solid,
                                 image: null,
+                                imageSrc: parsed.background.imageSrc || '',
                                 imageFit: parsed.background.imageFit || 'cover',
                                 imageBlur: parsed.background.imageBlur || 0,
                                 overlayColor: parsed.background.overlayColor || '#000000',
@@ -1663,7 +1706,7 @@ function loadState() {
                                     name: s.name || 'Blank Screen',
                                     deviceType: s.deviceType,
                                     localizedImages: {},
-                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                    background: restoreBackgroundImage(s.background ? { ...s.background } : cloneBackground(migratedBackground)),
                                     screenshot: screenshotSettings,
                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                     elements: reconstructElementImages(s.elements),
@@ -1702,7 +1745,7 @@ function loadState() {
                                                     name: s.name,
                                                     deviceType: s.deviceType,
                                                     localizedImages: localizedImages,
-                                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                                    background: restoreBackgroundImage(s.background ? { ...s.background } : cloneBackground(migratedBackground)),
                                                     screenshot: screenshotSettings,
                                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                                     elements: reconstructElementImages(s.elements),
@@ -1747,7 +1790,7 @@ function loadState() {
                                         name: s.name,
                                         deviceType: s.deviceType,
                                         localizedImages: localizedImages,
-                                        background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                        background: restoreBackgroundImage(s.background ? { ...s.background } : cloneBackground(migratedBackground)),
                                         screenshot: screenshotSettings,
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         elements: reconstructElementImages(s.elements),
@@ -1795,6 +1838,8 @@ function loadState() {
                         state.defaults = parsed.defaults;
                         // Ensure elements array exists (may be missing from older saves)
                         if (!state.defaults.elements) state.defaults.elements = [];
+                        // Rebuild the background Image object from its saved source
+                        restoreBackgroundImage(state.defaults.background);
                     } else {
                         state.defaults.background = migratedBackground;
                         state.defaults.screenshot = migratedScreenshot;
@@ -2042,11 +2087,12 @@ function duplicateScreenshot(index) {
     const clone = JSON.parse(JSON.stringify({
         name: original.name,
         deviceType: original.deviceType,
-        background: original.background,
         screenshot: original.screenshot,
         text: original.text,
         overrides: original.overrides
     }));
+    // Background holds a live Image object, so it needs its own clone helper
+    clone.background = cloneBackground(original.background);
 
     const nameParts = clone.name.split('.');
     if (nameParts.length > 1) {
@@ -2175,6 +2221,15 @@ function syncUIWithState() {
     document.getElementById('solid-color-hex').value = bg.solid;
 
     // Image background
+    const bgPreview = document.getElementById('bg-image-preview');
+    const bgImageSrc = bg.image?.src || bg.imageSrc || '';
+    if (bgImageSrc) {
+        bgPreview.src = bgImageSrc;
+        bgPreview.style.display = 'block';
+    } else {
+        bgPreview.removeAttribute('src');
+        bgPreview.style.display = 'none';
+    }
     document.getElementById('bg-image-fit').value = bg.imageFit;
     document.getElementById('bg-blur').value = bg.imageBlur;
     document.getElementById('bg-blur-value').textContent = formatValue(bg.imageBlur) + 'px';
@@ -6197,7 +6252,7 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
         name: name || 'Blank Screen',
         deviceType: deviceType,
         localizedImages: localizedImages,
-        background: JSON.parse(JSON.stringify(state.defaults.background)),
+        background: cloneBackground(state.defaults.background),
         screenshot: JSON.parse(JSON.stringify(state.defaults.screenshot)),
         text: JSON.parse(JSON.stringify(textDefaults)),
         elements: JSON.parse(JSON.stringify(state.defaults.elements || [])),
@@ -6580,12 +6635,8 @@ function transferStyle(sourceIndex, targetIndex) {
         return;
     }
 
-    // Deep copy background settings
-    target.background = JSON.parse(JSON.stringify(source.background));
-    // Handle background image separately (not JSON serializable)
-    if (source.background.image) {
-        target.background.image = source.background.image;
-    }
+    // Deep copy background settings (keeps the live Image reference)
+    target.background = cloneBackground(source.background);
 
     // Deep copy screenshot settings
     target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
@@ -6643,12 +6694,8 @@ function applyStyleToAll() {
     state.screenshots.forEach((target, index) => {
         if (index === applyStyleSourceIndex) return; // Skip source
 
-        // Deep copy background settings
-        target.background = JSON.parse(JSON.stringify(source.background));
-        // Handle background image separately (not JSON serializable)
-        if (source.background.image) {
-            target.background.image = source.background.image;
-        }
+        // Deep copy background settings (keeps the live Image reference)
+        target.background = cloneBackground(source.background);
 
         // Deep copy screenshot settings
         target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
