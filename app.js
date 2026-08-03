@@ -222,11 +222,74 @@ function getElementText(el) {
     return el.text || '';
 }
 
+// Layout properties an element can override per language
+const ELEMENT_LAYOUT_KEYS = ['x', 'y', 'width', 'rotation', 'fontSize'];
+
+function elementGlobalLayout(el) {
+    const layout = {};
+    ELEMENT_LAYOUT_KEYS.forEach(key => { layout[key] = el[key]; });
+    return layout;
+}
+
+function getElementLanguageSettings(el, lang) {
+    if (!el.languageSettings) el.languageSettings = {};
+    if (!el.languageSettings[lang]) {
+        // Seed from the language that was last edited, else from the global values
+        const source = el.languageSettings[el.currentLayoutLang];
+        el.languageSettings[lang] = source ? { ...source } : elementGlobalLayout(el);
+    }
+    return el.languageSettings[lang];
+}
+
+// Effective layout for an element, honouring its per-language overrides
+function getElementLayout(el, lang = state.currentLanguage) {
+    if (!el.perLanguageLayout) return elementGlobalLayout(el);
+    return getElementLanguageSettings(el, lang);
+}
+
+function setElementLayoutValue(el, key, value) {
+    if (!el.perLanguageLayout) {
+        el[key] = value;
+        return;
+    }
+    const lang = state.currentLanguage;
+    getElementLanguageSettings(el, lang)[key] = value;
+    el.currentLayoutLang = lang;
+}
+
+// Graphic elements can hold one image per language (el.srcs / el.images),
+// mirroring how text elements hold one string per language (el.texts).
+function getElementImage(el) {
+    if (el.type === 'graphic' && el.images) {
+        return el.images[state.currentLanguage]
+            || el.images['en']
+            || Object.values(el.images).find(v => v)
+            || el.image
+            || null;
+    }
+    return el.image || null;
+}
+
+function getElementImageSrc(el) {
+    if (el.type === 'graphic' && el.srcs) {
+        return el.srcs[state.currentLanguage]
+            || el.srcs['en']
+            || Object.values(el.srcs).find(v => v)
+            || el.src
+            || null;
+    }
+    return el.src || el.image?.src || null;
+}
+
 function setElementProperty(id, key, value) {
     const elements = getElements();
     const el = elements.find(e => e.id === id);
     if (el) {
-        el[key] = value;
+        if (ELEMENT_LAYOUT_KEYS.includes(key)) {
+            setElementLayoutValue(el, key, value);
+        } else {
+            el[key] = value;
+        }
         updateCanvas();
         updateElementsList();
     }
@@ -322,6 +385,8 @@ function addGraphicElement(img, src, name) {
         layer: 'above-text',
         image: img,
         src: src,
+        images: { [state.currentLanguage]: img },
+        srcs: { [state.currentLanguage]: src },
         name: name || 'Graphic',
         text: '',
         font: "-apple-system, BlinkMacSystemFont, 'SF Pro Display'",
@@ -335,6 +400,38 @@ function addGraphicElement(img, src, name) {
     };
     screenshot.elements.push(el);
     selectedElementId = el.id;
+    updateCanvas();
+    updateElementsList();
+    updateElementProperties();
+}
+
+// Attach a per-language image to a graphic element
+function setGraphicElementImage(el, img, src, lang) {
+    if (!el || el.type !== 'graphic') return;
+    if (!el.images) el.images = {};
+    if (!el.srcs) el.srcs = {};
+    el.images[lang] = img;
+    el.srcs[lang] = src;
+    // Keep the legacy single-image fields pointing at something valid
+    if (!el.src || lang === state.currentLanguage) {
+        el.image = img;
+        el.src = src;
+    }
+    updateCanvas();
+    updateElementsList();
+    updateElementProperties();
+}
+
+function removeGraphicElementImage(el, lang) {
+    if (!el || el.type !== 'graphic' || !el.srcs) return;
+    delete el.srcs[lang];
+    if (el.images) delete el.images[lang];
+    // Re-point the legacy fields at any remaining image
+    const fallbackLang = Object.keys(el.srcs)[0];
+    if (fallbackLang) {
+        el.src = el.srcs[fallbackLang];
+        el.image = el.images?.[fallbackLang] || el.image;
+    }
     updateCanvas();
     updateElementsList();
     updateElementProperties();
@@ -1550,7 +1647,8 @@ function saveState() {
             text: s.text,
             elements: (s.elements || []).map(el => ({
                 ...el,
-                image: undefined // Don't serialize Image objects
+                image: undefined, // Don't serialize Image objects
+                images: undefined // Per-language Image objects are rebuilt from srcs
             })),
             popouts: s.popouts || [],
             overrides: s.overrides
@@ -1572,7 +1670,8 @@ function saveState() {
             background: serializeBackground(state.defaults.background),
             elements: (state.defaults.elements || []).map(el => ({
                 ...el,
-                image: undefined // Don't serialize Image objects
+                image: undefined, // Don't serialize Image objects
+                images: undefined // Per-language Image objects are rebuilt from srcs
             }))
         }
     };
@@ -1617,10 +1716,21 @@ function reconstructElementImages(elements) {
     if (!elements || !Array.isArray(elements)) return [];
     return elements.map(el => {
         const restored = { ...el };
-        if (el.type === 'graphic' && el.src) {
-            const img = new Image();
-            img.src = el.src;
-            restored.image = img;
+        if (el.type === 'graphic' && (el.src || el.srcs)) {
+            if (el.src) {
+                const img = new Image();
+                img.src = el.src;
+                restored.image = img;
+            }
+            if (el.srcs) {
+                restored.images = {};
+                Object.keys(el.srcs).forEach(lang => {
+                    if (!el.srcs[lang]) return;
+                    const langImg = new Image();
+                    langImg.src = el.srcs[lang];
+                    restored.images[lang] = langImg;
+                });
+            }
         } else if (el.type === 'icon' && el.iconName) {
             // Async fetch; image will be null initially, then updateCanvas() when ready
             getLucideImage(el.iconName, el.iconColor || '#ffffff', el.iconStrokeWidth || 2)
@@ -2407,8 +2517,8 @@ function updateElementsList() {
         };
 
         let thumbContent;
-        if (el.type === 'graphic' && el.image) {
-            thumbContent = `<img src="${el.image.src}" alt="${el.name}">`;
+        if (el.type === 'graphic' && getElementImageSrc(el)) {
+            thumbContent = `<img src="${getElementImageSrc(el)}" alt="${el.name}">`;
         } else if (el.type === 'emoji') {
             thumbContent = `<span class="emoji-thumb">${el.emoji}</span>`;
         } else if (el.type === 'icon' && el.image) {
@@ -2481,32 +2591,57 @@ function updateElementProperties() {
     const titleMap = { text: 'Text Element', emoji: `${el.emoji} Emoji`, icon: `Icon: ${el.name}`, graphic: el.name || 'Graphic' };
     document.getElementById('element-properties-title').textContent = titleMap[el.type] || el.name || 'Element';
 
+    const layout = getElementLayout(el);
     document.getElementById('element-layer').value = el.layer;
-    document.getElementById('element-x').value = el.x;
-    document.getElementById('element-x-value').textContent = formatValue(el.x) + '%';
-    document.getElementById('element-y').value = el.y;
-    document.getElementById('element-y-value').textContent = formatValue(el.y) + '%';
-    document.getElementById('element-width').value = el.width;
-    document.getElementById('element-width-value').textContent = formatValue(el.width) + '%';
-    document.getElementById('element-rotation').value = el.rotation;
-    document.getElementById('element-rotation-value').textContent = formatValue(el.rotation) + '°';
+    document.getElementById('element-x').value = layout.x;
+    document.getElementById('element-x-value').textContent = formatValue(layout.x) + '%';
+    document.getElementById('element-y').value = layout.y;
+    document.getElementById('element-y-value').textContent = formatValue(layout.y) + '%';
+    document.getElementById('element-width').value = layout.width;
+    document.getElementById('element-width-value').textContent = formatValue(layout.width) + '%';
+    document.getElementById('element-rotation').value = layout.rotation;
+    document.getElementById('element-rotation-value').textContent = formatValue(layout.rotation) + '°';
+
+    // Per-language layout
+    const perLangToggle = document.getElementById('element-per-language-layout-toggle');
+    const perLangHint = document.getElementById('element-layout-lang-hint');
+    if (perLangToggle) {
+        perLangToggle.classList.toggle('active', el.perLanguageLayout || false);
+    }
+    if (perLangHint) {
+        if (el.perLanguageLayout) {
+            const lang = state.currentLanguage;
+            const flag = languageFlags[lang] || '🏳️';
+            perLangHint.textContent = `Editing layout for ${flag} ${languageNames[lang] || lang.toUpperCase()}`;
+            perLangHint.style.display = '';
+        } else {
+            perLangHint.style.display = 'none';
+        }
+    }
     document.getElementById('element-opacity').value = el.opacity;
     document.getElementById('element-opacity-value').textContent = formatValue(el.opacity) + '%';
 
     // Type-specific properties
     const textProps = document.getElementById('element-text-properties');
     const iconProps = document.getElementById('element-icon-properties');
+    const graphicProps = document.getElementById('element-graphic-properties');
 
     // Hide all type-specific panels first
     textProps.style.display = 'none';
     if (iconProps) iconProps.style.display = 'none';
+    if (graphicProps) graphicProps.style.display = 'none';
+
+    if (el.type === 'graphic' && graphicProps) {
+        graphicProps.style.display = '';
+        updateElementLangImages(el);
+    }
 
     if (el.type === 'text') {
         textProps.style.display = '';
         document.getElementById('element-text-input').value = getElementText(el);
         document.getElementById('element-font').value = el.font;
         updateElementFontPickerPreview(el);
-        document.getElementById('element-font-size').value = el.fontSize;
+        document.getElementById('element-font-size').value = layout.fontSize;
         document.getElementById('element-font-color').value = el.fontColor;
         document.getElementById('element-font-weight').value = el.fontWeight;
         document.getElementById('element-italic-btn').classList.toggle('active', el.italic);
@@ -2546,7 +2681,81 @@ function updateElementProperties() {
     }
 }
 
+// Render the per-language image list for the selected graphic element
+function updateElementLangImages(el) {
+    const container = document.getElementById('element-lang-images');
+    if (!container || !el || el.type !== 'graphic') return;
+
+    const langs = state.projectLanguages?.length ? state.projectLanguages : [state.currentLanguage];
+    container.innerHTML = langs.map(lang => {
+        const src = el.srcs?.[lang];
+        const flag = languageFlags[lang] || '🏳️';
+        const name = languageNames[lang] || lang.toUpperCase();
+        const isCurrent = lang === state.currentLanguage;
+        const thumb = src
+            ? `<img src="${src}" alt="${escapeHtml(name)}">`
+            : `<span class="element-lang-image-empty">—</span>`;
+        return `
+            <div class="element-lang-image${isCurrent ? ' current' : ''}" data-lang="${lang}">
+                <div class="element-lang-image-thumb">${thumb}</div>
+                <div class="element-lang-image-name">${flag} ${escapeHtml(name)}</div>
+                <div class="element-lang-image-actions">
+                    <button class="element-item-btn" data-action="upload" title="Set image for ${escapeHtml(name)}">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                    </button>
+                    <button class="element-item-btn danger" data-action="remove" title="Remove" ${src ? '' : 'disabled'}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>`;
+    }).join('');
+}
+
+// Language the pending per-language graphic upload is for
+let pendingGraphicLang = null;
+
 function setupElementEventListeners() {
+    // Per-language graphic images
+    const langImages = document.getElementById('element-lang-images');
+    const langGraphicInput = document.getElementById('element-lang-graphic-input');
+    if (langImages && langGraphicInput) {
+        langImages.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            const lang = btn.closest('.element-lang-image')?.dataset.lang;
+            const el = getSelectedElement();
+            if (!lang || !el) return;
+            if (btn.dataset.action === 'upload') {
+                pendingGraphicLang = lang;
+                langGraphicInput.click();
+            } else if (btn.dataset.action === 'remove') {
+                removeGraphicElementImage(el, lang);
+            }
+        });
+        langGraphicInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const lang = pendingGraphicLang;
+            pendingGraphicLang = null;
+            langGraphicInput.value = '';
+            if (!file || !lang) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const img = new Image();
+                img.onload = () => {
+                    const el = getSelectedElement();
+                    setGraphicElementImage(el, img, ev.target.result, lang);
+                };
+                img.src = ev.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
     // Add Graphic button
     const addGraphicBtn = document.getElementById('add-graphic-btn');
     const graphicInput = document.getElementById('element-graphic-input');
@@ -2703,6 +2912,26 @@ function setupElementEventListeners() {
     bindSlider('element-opacity', 'opacity', '%');
     bindSlider('element-font-size', 'fontSize', '', parseInt);
     bindSlider('element-frame-scale', 'frameScale', '%');
+
+    // Per-language layout toggle
+    const elPerLangToggle = document.getElementById('element-per-language-layout-toggle');
+    if (elPerLangToggle) {
+        elPerLangToggle.addEventListener('click', function () {
+            const el = getSelectedElement();
+            if (!el) return;
+            const enabled = !el.perLanguageLayout;
+            if (enabled) {
+                // Seed every project language from the current global values
+                const langs = state.projectLanguages?.length ? state.projectLanguages : [state.currentLanguage];
+                el.languageSettings = {};
+                langs.forEach(lang => { el.languageSettings[lang] = elementGlobalLayout(el); });
+                el.currentLayoutLang = state.currentLanguage;
+            }
+            el.perLanguageLayout = enabled;
+            updateCanvas();
+            updateElementProperties();
+        });
+    }
 
     // Layer dropdown
     const layerSelect = document.getElementById('element-layer');
@@ -2870,17 +3099,19 @@ function setupElementCanvasDrag() {
         for (const layer of layers) {
             const layerEls = elements.filter(el => el.layer === layer).reverse();
             for (const el of layerEls) {
-                const cx = dims.width * (el.x / 100);
-                const cy = dims.height * (el.y / 100);
-                const elWidth = dims.width * (el.width / 100);
+                const layout = getElementLayout(el);
+                const cx = dims.width * (layout.x / 100);
+                const cy = dims.height * (layout.y / 100);
+                const elWidth = dims.width * (layout.width / 100);
                 let elHeight;
 
                 if (el.type === 'emoji' || el.type === 'icon') {
                     elHeight = elWidth; // square bounding box
-                } else if (el.type === 'graphic' && el.image) {
-                    elHeight = elWidth * (el.image.height / el.image.width);
+                } else if (el.type === 'graphic' && getElementImage(el)) {
+                    const hImg = getElementImage(el);
+                    elHeight = elWidth * (hImg.height / hImg.width);
                 } else {
-                    elHeight = el.fontSize * 1.5;
+                    elHeight = layout.fontSize * 1.5;
                 }
 
                 // Simple bounding box hit test (ignoring rotation for simplicity)
@@ -2920,8 +3151,8 @@ function setupElementCanvasDrag() {
         } else {
             const el = getElements().find(e => e.id === draggingElement.id);
             if (el) {
-                el.x = snapped.x;
-                el.y = snapped.y;
+                setElementLayoutValue(el, 'x', snapped.x);
+                setElementLayoutValue(el, 'y', snapped.y);
                 updateCanvas();
                 drawSnapGuides();
                 updateElementProperties();
@@ -2980,8 +3211,8 @@ function setupElementCanvasDrag() {
                 id: hit.id,
                 startX: coords.x,
                 startY: coords.y,
-                origX: hit.x,
-                origY: hit.y,
+                origX: getElementLayout(hit).x,
+                origY: getElementLayout(hit).y,
                 dims: dims,
                 isPopout: false
             };
@@ -3047,8 +3278,8 @@ function setupElementCanvasDrag() {
                 id: hit.id,
                 startX: coords.x,
                 startY: coords.y,
-                origX: hit.x,
-                origY: hit.y,
+                origX: getElementLayout(hit).x,
+                origY: getElementLayout(hit).y,
                 dims: dims,
                 isPopout: false
             };
@@ -3084,7 +3315,8 @@ function drawSnapGuides() {
     ctx.setLineDash([12 * scale, 8 * scale]);
 
     // Vertical center line (x = 50%)
-    if (Math.abs(el.x - 50) < 0.01) {
+    const guideLayout = getElementLayout(el);
+    if (Math.abs(guideLayout.x - 50) < 0.01) {
         const lineX = Math.round(dims.width * 0.5);
         ctx.beginPath();
         ctx.moveTo(lineX, 0);
@@ -3093,7 +3325,7 @@ function drawSnapGuides() {
     }
 
     // Horizontal middle line (y = 50%)
-    if (Math.abs(el.y - 50) < 0.01) {
+    if (Math.abs(guideLayout.y - 50) < 0.01) {
         const lineY = Math.round(dims.height * 0.5);
         ctx.beginPath();
         ctx.moveTo(0, lineY);
@@ -6758,9 +6990,10 @@ function transferStyle(sourceIndex, targetIndex) {
 
     // Deep copy elements (reconstruct Image objects for graphics and icons)
     target.elements = (source.elements || []).map(el => {
-        const copy = JSON.parse(JSON.stringify({ ...el, image: undefined }));
-        if (el.type === 'graphic' && el.image) {
-            copy.image = el.image;
+        const copy = JSON.parse(JSON.stringify({ ...el, image: undefined, images: undefined }));
+        if (el.type === 'graphic') {
+            if (el.image) copy.image = el.image;
+            if (el.images) copy.images = { ...el.images };
         } else if (el.type === 'icon' && el.image) {
             copy.image = el.image;
         }
@@ -6817,9 +7050,10 @@ function applyStyleToAll() {
 
         // Deep copy elements
         target.elements = (source.elements || []).map(el => {
-            const copy = JSON.parse(JSON.stringify({ ...el, image: undefined }));
-            if (el.type === 'graphic' && el.image) {
-                copy.image = el.image;
+            const copy = JSON.parse(JSON.stringify({ ...el, image: undefined, images: undefined }));
+            if (el.type === 'graphic') {
+                if (el.image) copy.image = el.image;
+                if (el.images) copy.images = { ...el.images };
             }
             copy.id = crypto.randomUUID();
             return copy;
@@ -7580,13 +7814,14 @@ function drawElementsToContext(context, dims, elements, layer) {
         context.save();
         context.globalAlpha = el.opacity / 100;
 
-        const cx = dims.width * (el.x / 100);
-        const cy = dims.height * (el.y / 100);
-        const elWidth = dims.width * (el.width / 100);
+        const layout = getElementLayout(el);
+        const cx = dims.width * (layout.x / 100);
+        const cy = dims.height * (layout.y / 100);
+        const elWidth = dims.width * (layout.width / 100);
 
         context.translate(cx, cy);
-        if (el.rotation !== 0) {
-            context.rotate(el.rotation * Math.PI / 180);
+        if (layout.rotation !== 0) {
+            context.rotate(layout.rotation * Math.PI / 180);
         }
 
         if (el.type === 'emoji' && el.emoji) {
@@ -7617,23 +7852,25 @@ function drawElementsToContext(context, dims, elements, layer) {
                 context.shadowOffsetX = 0;
                 context.shadowOffsetY = 0;
             }
-        } else if (el.type === 'graphic' && el.image) {
-            const aspect = el.image.height / el.image.width;
+        } else if (el.type === 'graphic') {
+            const gImg = getElementImage(el);
+            if (!gImg) { context.restore(); return; }
+            const aspect = gImg.height / gImg.width;
             const elHeight = elWidth * aspect;
-            context.drawImage(el.image, -elWidth / 2, -elHeight / 2, elWidth, elHeight);
+            context.drawImage(gImg, -elWidth / 2, -elHeight / 2, elWidth, elHeight);
         } else if (el.type === 'text') {
             const elText = getElementText(el);
             if (!elText) { context.restore(); return; }
             const fontStyle = el.italic ? 'italic' : 'normal';
-            context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
+            context.font = `${fontStyle} ${el.fontWeight} ${layout.fontSize}px ${el.font}`;
             context.fillStyle = el.fontColor;
             context.textAlign = 'center';
             context.textBaseline = 'middle';
 
             // Word-wrap text within element width (respects manual line breaks)
             const lines = wrapText(context, elText, elWidth);
-            const lineHeight = el.fontSize * 1.05;
-            const totalHeight = (lines.length - 1) * lineHeight + el.fontSize;
+            const lineHeight = layout.fontSize * 1.05;
+            const totalHeight = (lines.length - 1) * lineHeight + layout.fontSize;
 
             // Draw frame behind text if enabled
             if (el.frame && el.frame !== 'none') {
@@ -7641,7 +7878,7 @@ function drawElementsToContext(context, dims, elements, layer) {
             }
 
             // Draw text lines
-            const startY = -(totalHeight / 2) + el.fontSize / 2;
+            const startY = -(totalHeight / 2) + layout.fontSize / 2;
             lines.forEach((line, i) => {
                 context.fillText(line, 0, startY + i * lineHeight);
             });
@@ -7740,10 +7977,11 @@ function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
 
 // Draw decorative frames around text elements
 function drawElementFrame(context, el, dims, textWidth, textHeight) {
+    const layout = getElementLayout(el);
     const scale = el.frameScale / 100;
-    const padding = el.fontSize * 0.4 * scale;
+    const padding = layout.fontSize * 0.4 * scale;
     // Measure the widest line (using wrapText to match rendering)
-    const elWidth = dims.width * (el.width / 100);
+    const elWidth = dims.width * (layout.width / 100);
     const lines = wrapText(context, getElementText(el), elWidth);
     const maxLineW = Math.max(...lines.map(l => context.measureText(l).width));
     const frameW = maxLineW + padding * 2;
@@ -7752,7 +7990,7 @@ function drawElementFrame(context, el, dims, textWidth, textHeight) {
     context.save();
     context.strokeStyle = el.frameColor;
     context.fillStyle = 'none';
-    context.lineWidth = Math.max(2, el.fontSize * 0.04) * scale;
+    context.lineWidth = Math.max(2, layout.fontSize * 0.04) * scale;
 
     const isLaurel = el.frame.startsWith('laurel-');
     const hasStar = el.frame.endsWith('-star');
@@ -7761,7 +7999,7 @@ function drawElementFrame(context, el, dims, textWidth, textHeight) {
         const variant = el.frame.includes('detailed') ? 'laurel-detailed-left' : 'laurel-simple-left';
         drawLaurelSVG(context, variant, frameW, frameH, scale, el.frameColor);
         if (hasStar) {
-            drawStar(context, 0, -frameH / 2 - el.fontSize * 0.2 * scale, el.fontSize * 0.3 * scale, el.frameColor);
+            drawStar(context, 0, -frameH / 2 - layout.fontSize * 0.2 * scale, layout.fontSize * 0.3 * scale, el.frameColor);
         }
     } else if (el.frame === 'badge-circle') {
         context.beginPath();

@@ -1102,6 +1102,14 @@
                     </div>
 
                     <div class="control-group">
+                        <div class="toggle-row">
+                            <span class="toggle-label">Per-language layout</span>
+                            <div class="toggle" id="element-per-language-layout-toggle"></div>
+                        </div>
+                        <p class="control-hint" id="element-layout-lang-hint" style="display: none;"></p>
+                    </div>
+
+                    <div class="control-group">
                         <label class="control-label">Position X</label>
                         <div class="control-row">
                             <input type="range" id="element-x" min="0" max="100" value="50">
@@ -1207,6 +1215,14 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+
+                    <!-- Graphic element properties -->
+                    <div id="element-graphic-properties" style="display: none;">
+                        <div class="divider"></div>
+                        <label class="control-label">Images per Language</label>
+                        <div class="element-lang-images" id="element-lang-images"></div>
+                        <input type="file" id="element-lang-graphic-input" accept="image/*" hidden>
                     </div>
 
                     <!-- Text element properties -->
